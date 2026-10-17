@@ -1,0 +1,15 @@
+{
+  "Enabled": true,
+  "StarterCreditsPerPlayer": 300,
+  "BuyAdminOnly": false,
+  "BountiesEnabled": true,
+  "RewardKillFraction": 0.1,
+  "RewardResetOnGameEnd": true,
+  "StructureKillRewardsEnabled": true,
+  "BuySpawnDistance": 15.0,
+  "BuyMinDistanceFromEnemyCritical": 400.0,
+  "BuyMaxDistanceFromOwnCritical": 800.0,
+  "ShrimpBuyUnlockSeconds": 600.0,
+  "BuyCooldownSeconds": 240.0,
+  "BuyStructuresEnabled": false
+}
