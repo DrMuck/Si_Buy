@@ -39,6 +39,8 @@ KGT `Mode`: 1 and 2 ran the economy, 3 did not.
 | `/1`-`/N`, `/back`, `/0` | Navigate while the menu is open |
 | `/buy back`, `/buy exit` | Same without the shared shortcuts |
 | `/buy status` | Economy state and your balance |
+| `/buy <C> <U>` | Direct purchase: category C, item U in menu order; no menu is opened |
+| `/buy <name>` | Direct purchase by display name, e.g. `/buy Heavy Tank` |
 
 Purchases are refused with a reason: not controlling a unit, not enough credits, cooldown, Shrimp
 lock, too close to an enemy HQ / Nest / Queen, too far from your own HQ / Nest.
@@ -89,6 +91,7 @@ public static bool GrantExternalCredits(long steamId, int amount, string reason)
 public static bool SpendCredits(long steamId, int amount, string reason)         // false while off / insufficient
 public static int  GetCreditsBySteamId(long steamId)
 public static int  GetCredits(Player player)
+public static string? ModUIData()   // catalog JSON for Si_ModUI: {cmd, enabled, shrimpLock, catalog:{Sol:[{c,u:[[name,cost]]}]}}
 ```
 
 `steamId` is the Steam64 (`(long)player.PlayerID.m_ID`). Declare `"Buy"` in

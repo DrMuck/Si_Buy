@@ -8,6 +8,8 @@
                     - At UnitList: PURCHASE unit N (costs credits, spawns unit)
    /buy back      → go up one level
    /buy exit      → close menu
+   /buy <C> <U>   → direct purchase: category C, item U (menu order), no menu opened
+   /buy <name>    → direct purchase by display name, e.g. /buy Heavy Tank
 
  We avoid /1-/20 player commands (Si_UnitBalanceUI owns those for !b / /stats, we hook the chat event instead).
  All navigation goes through /buy <subcmd> instead.
@@ -151,6 +153,11 @@ namespace Si_Buy
                 }
                 return;
             }
+
+            // Direct purchase ("/buy 2 3", "/buy Heavy Tank"): resolved from the catalog, never touches the menu state.
+            bool navWord = sub == "exit" || sub == "close" || sub == "0" || sub == "back";
+            bool numeric = int.TryParse(sub, NumberStyles.Integer, CultureInfo.InvariantCulture, out _);
+            if (!navWord && (!numeric || parts.Length >= 3) && TryDirectBuy(caller, parts)) return;
 
             HandleBuyNav(caller, state, sub);
         }
@@ -359,19 +366,11 @@ namespace Si_Buy
             return PrefabForObjectInfo(objectInfoName ?? "") != null || PrefabByName(prefabHint ?? "") != null;
         }
 
-        // === Menu rendering ===
+        // === Catalog builders (shared by the chat menu, direct purchase and ModUI export) ===
 
-        static void ShowCategories(Player caller, BuyState state)
+        /// <summary>Categories (built_at names) a faction can buy from, in menu order. Deterministic, so a client can address them by index.</summary>
+        static List<string> BuildCategories(string faction)
         {
-            int credits = GetCredits(caller);
-            string faction = DumpFactionForTeam(caller.Team);
-            if (string.IsNullOrEmpty(faction))
-            {
-                Reply(caller, "[Buy] No faction detected for your team — cannot show menu.");
-                return;
-            }
-
-            // Collect distinct categories (built_at values) for units of this faction.
             var seen = new HashSet<string>();
             var ordered = new List<string>();
             foreach (var kv in _unitFaction)
@@ -391,25 +390,13 @@ namespace Si_Buy
             // existing unit-tier numbering stays stable.
             if (Cfg.BuyStructuresEnabled && CountStructuresForFaction(faction) > 0)
                 ordered.Add(STRUCTURES_CATEGORY);
-
-            state.CategoriesShown = ordered;
-
-            Reply(caller, $"[Buy] === Buy Menu === Credits: <color={COLOR_AFFORD}>{credits}</color>");
-            for (int i = 0; i < ordered.Count; i++)
-            {
-                int unitCount = CountUnitsInCategoryForFaction(ordered[i], faction);
-                Reply(caller, $"  {i + 1}. {ordered[i]} ({unitCount})");
-            }
-            Reply(caller, "/1-/N drill in  ·  /0 to close  (or /buy <N>)");
+            return ordered;
         }
 
-        static void ShowUnits(Player caller, BuyState state)
+        /// <summary>Buyable items of one faction + category, cheapest first.</summary>
+        static List<BuyChoice> BuildUnits(string faction, string category)
         {
-            int credits = GetCredits(caller);
-            string faction = DumpFactionForTeam(caller.Team);
-
-            // Collect items in this faction + category, sorted by cost asc.
-            bool wantStructures = string.Equals(state.CategoryBuiltAt, STRUCTURES_CATEGORY, StringComparison.OrdinalIgnoreCase);
+            bool wantStructures = string.Equals(category, STRUCTURES_CATEGORY, StringComparison.OrdinalIgnoreCase);
             var items = new List<BuyChoice>();
             if (wantStructures)
             {
@@ -438,7 +425,7 @@ namespace Si_Buy
                     if (!string.Equals(kv.Value, faction, StringComparison.OrdinalIgnoreCase)) continue;
                     if (_isStructure.Contains(kv.Key)) continue;   // structures handled above
                     if (!_unitToBuilding.TryGetValue(kv.Key, out string builtAt)) continue;
-                    if (!string.Equals(builtAt, state.CategoryBuiltAt, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!string.Equals(builtAt, category, StringComparison.OrdinalIgnoreCase)) continue;
                     if (!_unitCost.TryGetValue(kv.Key, out int cost) || cost <= 0) continue;
                     _unitPrefab.TryGetValue(kv.Key, out string prefab);
                     _internalByDisplay.TryGetValue(kv.Key, out string objectInfoName);
@@ -452,7 +439,116 @@ namespace Si_Buy
                 }
             }
             items.Sort((a, b) => a.Cost.CompareTo(b.Cost));
+            return items;
+        }
 
+        /// <summary>
+        /// One-shot purchase without opening the menu: "/buy 2 3" (category 2, item 3 in menu order)
+        /// or "/buy Heavy Tank" (display name, any category of the caller's faction).
+        /// Used by the ModUI client, which knows the catalog from ModUIData().
+        /// Returns false when the arguments are not a direct purchase.
+        /// </summary>
+        static bool TryDirectBuy(Player caller, string[] parts)
+        {
+            if (parts.Length < 2) return false;
+            string faction = DumpFactionForTeam(caller.Team);
+            if (string.IsNullOrEmpty(faction)) return false;
+
+            if (parts.Length >= 3
+                && int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int c) && c >= 1
+                && int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int u) && u >= 1)
+            {
+                var cats = BuildCategories(faction);
+                if (c > cats.Count) { Reply(caller, $"[Buy] No category {c} (1-{cats.Count})."); return true; }
+                var units = BuildUnits(faction, cats[c - 1]);
+                if (u > units.Count) { Reply(caller, $"[Buy] No item {u} in {cats[c - 1]} (1-{units.Count})."); return true; }
+                TryPurchase(caller, units[u - 1]);
+                return true;
+            }
+
+            string name = string.Join(" ", parts, 1, parts.Length - 1).Trim();
+            if (name.Length == 0 || name[0] == '/') return false;
+            foreach (var cat in BuildCategories(faction))
+                foreach (var item in BuildUnits(faction, cat))
+                    if (string.Equals(item.Display, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        TryPurchase(caller, item);
+                        return true;
+                    }
+            Reply(caller, $"[Buy] '{name}' is not buyable for {faction}. Use /buy to see the menu.");
+            return true;
+        }
+
+        /// <summary>
+        /// Structured catalog for Si_ModUI (read by name through reflection on the server):
+        /// {"cmd":"/buy","enabled":true,"catalog":{"Sol":[{"c":"Barracks","u":[["Soldier",100],...]},...],...}}
+        /// Items are in the same order "/buy c u" uses. Null when the unit dump is not loaded yet.
+        /// </summary>
+        public static string? ModUIData()
+        {
+            try
+            {
+                if (_unitFaction.Count == 0) return null;
+                var catalog = new Newtonsoft.Json.Linq.JObject();
+                foreach (string faction in new[] { "Sol", "Centauri", "Alien" })
+                {
+                    var cats = new Newtonsoft.Json.Linq.JArray();
+                    foreach (var cat in BuildCategories(faction))
+                    {
+                        var units = new Newtonsoft.Json.Linq.JArray();
+                        foreach (var item in BuildUnits(faction, cat))
+                            units.Add(new Newtonsoft.Json.Linq.JArray(item.Display, item.Cost));
+                        if (units.Count > 0) cats.Add(new Newtonsoft.Json.Linq.JObject { ["c"] = cat, ["u"] = units });
+                    }
+                    if (cats.Count > 0) catalog[faction] = cats;
+                }
+                if (catalog.Count == 0) return null;
+                var doc = new Newtonsoft.Json.Linq.JObject
+                {
+                    ["cmd"] = "/buy",
+                    ["enabled"] = BuyActive,
+                    ["shrimpLock"] = (int)Cfg.ShrimpBuyUnlockSeconds,
+                    ["catalog"] = catalog,
+                };
+                return Newtonsoft.Json.JsonConvert.SerializeObject(doc, Newtonsoft.Json.Formatting.None);
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning($"[Buy] ModUIData failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        // === Menu rendering ===
+
+        static void ShowCategories(Player caller, BuyState state)
+        {
+            int credits = GetCredits(caller);
+            string faction = DumpFactionForTeam(caller.Team);
+            if (string.IsNullOrEmpty(faction))
+            {
+                Reply(caller, "[Buy] No faction detected for your team — cannot show menu.");
+                return;
+            }
+
+            var ordered = BuildCategories(faction);
+            state.CategoriesShown = ordered;
+
+            Reply(caller, $"[Buy] === Buy Menu === Credits: <color={COLOR_AFFORD}>{credits}</color>");
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                int unitCount = CountUnitsInCategoryForFaction(ordered[i], faction);
+                Reply(caller, $"  {i + 1}. {ordered[i]} ({unitCount})");
+            }
+            Reply(caller, "/1-/N drill in  ·  /0 to close  (or /buy <N>)");
+        }
+
+        static void ShowUnits(Player caller, BuyState state)
+        {
+            int credits = GetCredits(caller);
+            string faction = DumpFactionForTeam(caller.Team);
+
+            var items = BuildUnits(faction, state.CategoryBuiltAt);
             state.UnitsShown = items;
 
             float shrimpRemain = Cfg.ShrimpBuyUnlockSeconds > 0f ? Cfg.ShrimpBuyUnlockSeconds - RoundElapsedSeconds() : 0f;
