@@ -97,7 +97,7 @@ namespace Si_Buy
             if (_dumpLoaded) return;
             _dumpLoaded = true; // single-shot regardless of outcome
 
-            string path = Path.Combine("UserData", "UnitBalance_cfg", "Si_UnitBalance_Dump.json");
+            string path = Paths.UnitBalanceFile("Si_UnitBalance_Dump.json");
             if (!File.Exists(path))
             {
                 MelonLogger.Warning($"[Buy] Unit dump not found at {path} — prices and kill rewards fall back to live ConstructionData costs");
@@ -206,7 +206,7 @@ namespace Si_Buy
             // 2. Reset _unitCost to vanilla snapshot.
             foreach (var kv in _unitCostVanilla) _unitCost[kv.Key] = kv.Value;
 
-            string path = Path.Combine("UserData", "UnitBalance_cfg", "Si_UnitBalance_Config.json");
+            string path = Paths.UnitBalanceFile("Si_UnitBalance_Config.json");
             if (!File.Exists(path))
             {
                 MelonLogger.Msg($"[Buy] {path} not found — rewards use vanilla unit costs");

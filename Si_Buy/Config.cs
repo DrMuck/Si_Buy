@@ -86,8 +86,10 @@ namespace Si_Buy
         /// </summary>
         static bool TrySeedFromKingOfTheHillConfig()
         {
-            string kohPath = Path.Combine("UserData", "KingOfTheHill_cfg", "Si_KingOfTheHill_Config.json");
-            if (!File.Exists(kohPath)) return false;
+            string kohPath = Paths.FirstExisting(
+                Path.Combine(Paths.UserData, "cfg", "KingOfTheHill", "Si_KingOfTheHill_Config.json"),
+                Path.Combine(Paths.UserData, "KingOfTheHill_cfg", "Si_KingOfTheHill_Config.json"));
+            if (kohPath == null) return false;
             try
             {
                 string json = File.ReadAllText(kohPath);

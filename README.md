@@ -25,8 +25,8 @@ credits through that API; [Si_Logistics](https://github.com/DrMuck/Si_Logistics)
 3. Recommended: [Si_UnitBalance](https://github.com/DrMuck/Silica-UnitBalance) so prices and kill rewards see the modded costs
 4. Copy `Si_Buy.dll` to `Mods/`
 
-First start writes `UserData/Buy_cfg/Si_Buy_Config.json` and `UserData/Buy_cfg/Bounties.json`.
-If a pre-split `UserData/KingOfTheHill_cfg/Si_KingOfTheHill_Config.json` exists, its economy fields
+First start writes `UserData/cfg/Buy/Si_Buy_Config.json` and `UserData/cfg/Buy/Bounties.json`.
+If a pre-split `UserData/cfg/KingOfTheHill/Si_KingOfTheHill_Config.json` (or the older `UserData/KingOfTheHill_cfg/` one) exists, its economy fields
 (same names) seed the new config, and its `Bounties.json` is copied over. `Enabled` follows the old
 KGT `Mode`: 1 and 2 ran the economy, 3 did not.
 
@@ -59,7 +59,7 @@ All gate on SilicaAdminMod's `CanAdminExecute(Power.Generic)` and work while the
 
 ## Configuration
 
-`UserData/Buy_cfg/Si_Buy_Config.json` (see `Si_Buy_Config.example.json`):
+`UserData/cfg/Buy/Si_Buy_Config.json` (see `Si_Buy_Config.example.json`):
 
 | Field | Default | Meaning |
 |--|--|--|

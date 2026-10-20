@@ -1,7 +1,7 @@
 /*
  Bounty.cs — Headhunter bounty system.
 
- Admins maintain a list of "wanted" players in UserData/Buy_cfg/Bounties.json.
+ Admins maintain a list of "wanted" players in UserData/cfg/Buy/Bounties.json.
  When a wanted player connects, the bounty is announced in chat. When somebody
  (on any other team) kills a wanted player's unit, the killer receives the bounty
  amount as a bonus on top of the normal kill reward.
@@ -51,14 +51,16 @@ namespace Si_Buy
 
         static void LoadBountyConfig()
         {
-            _bountyConfigPath = Path.Combine("UserData", "Buy_cfg", "Bounties.json");
+            _bountyConfigPath = Path.Combine(Paths.ConfigDir, "Bounties.json");
             try
             {
                 if (!File.Exists(_bountyConfigPath))
                 {
                     // First start after the split from Si_KingOfTheHill: take over its list.
-                    string legacy = Path.Combine("UserData", "KingOfTheHill_cfg", "Bounties.json");
-                    if (File.Exists(legacy))
+                    string legacy = Paths.FirstExisting(
+                        Path.Combine(Paths.UserData, "cfg", "KingOfTheHill", "Bounties.json"),
+                        Path.Combine(Paths.UserData, "KingOfTheHill_cfg", "Bounties.json"));
+                    if (legacy != null)
                     {
                         var legacyDir = Path.GetDirectoryName(_bountyConfigPath);
                         if (!string.IsNullOrEmpty(legacyDir) && !Directory.Exists(legacyDir)) Directory.CreateDirectory(legacyDir);

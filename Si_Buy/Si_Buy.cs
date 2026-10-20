@@ -21,7 +21,7 @@
 
  Server-only mod (no client component required).
  Deploy: <server>\Mods\Si_Buy.dll
- Config: UserData\Buy_cfg\Si_Buy_Config.json  (+ Bounties.json next to it)
+ Config: UserData\cfg\Buy\Si_Buy_Config.json  (+ Bounties.json next to it)
 */
 
 using MelonLoader;
@@ -31,7 +31,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(Si_Buy.Buy), "Buy", "1.0.0", "DrMuck")]
+[assembly: MelonInfo(typeof(Si_Buy.Buy), "Buy", "1.1.0", "DrMuck")]
 [assembly: MelonGame("Bohemia Interactive", "Silica")]
 [assembly: MelonOptionalDependencies("Admin Mod", "Si_UnitBalance")]
 
@@ -54,7 +54,7 @@ namespace Si_Buy
 
         public override void OnInitializeMelon()
         {
-            _configPath = Path.Combine("UserData", "Buy_cfg", "Si_Buy_Config.json");
+            _configPath = Path.Combine(Paths.ConfigDir, "Si_Buy_Config.json");
             LoadConfig();
 
             // Reward system (kill events).
@@ -66,7 +66,7 @@ namespace Si_Buy
             // Headhunter bounty list (separate JSON next to the config).
             LoadBountyConfig();
 
-            MelonLogger.Msg($"[Buy] Si_Buy v1.0.0 loaded. Enabled={Cfg.Enabled} starter={Cfg.StarterCreditsPerPlayer}cr " +
+            MelonLogger.Msg($"[Buy] Si_Buy v1.1.0 loaded. Enabled={Cfg.Enabled} starter={Cfg.StarterCreditsPerPlayer}cr " +
                             $"killFraction={Cfg.RewardKillFraction:0.##} bounties={Cfg.BountiesEnabled} structures={Cfg.BuyStructuresEnabled}");
         }
 
