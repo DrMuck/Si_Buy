@@ -194,6 +194,17 @@ namespace Si_Buy
                     if (name.Equals(key, StringComparison.OrdinalIgnoreCase)) { best = p; break; }
                     if (best == null && name.StartsWith(key, StringComparison.OrdinalIgnoreCase)) best = p;
                 }
+                if (best == null)
+                {
+                    // unique substring (the Si_ModUI player picker sends the longest word of a name that no other name contains)
+                    Player? only = null; int hits = 0;
+                    foreach (var p in Player.Players)
+                    {
+                        if (p == null || p == server) continue;
+                        if ((p.PlayerName ?? "").IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0) { only = p; hits++; }
+                    }
+                    if (hits == 1) best = only;
+                }
                 if (best != null) steamId = GetPlayerSteamId(best);
                 return best;
             }
@@ -251,9 +262,15 @@ namespace Si_Buy
 
                 case "add":
                 {
-                    if (parts.Length < 4 || !long.TryParse(parts[3], out long addSid))
+                    long addSid = 0; string pickedName = "";
+                    if (parts.Length >= 4 && !long.TryParse(parts[3], out addSid))
                     {
-                        Reply(caller, "[Buy/Bounty] Usage: /buy bounty add <steamId> <amount> [name...]");
+                        var target = FindPlayer(parts[3], out addSid);   // a connected player's name works as well as the Steam ID
+                        if (target != null) pickedName = target.PlayerName ?? "";
+                    }
+                    if (parts.Length < 4 || addSid <= 0)
+                    {
+                        Reply(caller, "[Buy/Bounty] Usage: /buy bounty add <steamId|player> [amount] [name...]");
                         return;
                     }
                     // Re-read file first so any manual JSON edits (e.g. names typed in by hand)
@@ -275,7 +292,7 @@ namespace Si_Buy
                         : "";
 
                     // Preserve existing name/note if the caller didn't pass new ones.
-                    string finalName = addName;
+                    string finalName = addName.Length > 0 ? addName : pickedName;
                     string finalNote = "";
                     if (_bountyCfg.Bounties.TryGetValue(addSid, out var existing))
                     {
@@ -293,9 +310,21 @@ namespace Si_Buy
                 case "rm":
                 case "del":
                 {
-                    if (parts.Length < 4 || !long.TryParse(parts[3], out long rmSid))
+                    long rmSid = 0;
+                    if (parts.Length >= 4 && !long.TryParse(parts[3], out rmSid))
                     {
-                        Reply(caller, "[Buy/Bounty] Usage: /buy bounty remove <steamId>");
+                        FindPlayer(parts[3], out rmSid);   // connected player's name
+                        if (rmSid <= 0)
+                        {
+                            LoadBountyConfig();
+                            string needle = string.Join(" ", parts, 3, parts.Length - 3);
+                            foreach (var kv in _bountyCfg.Bounties)
+                                if (string.Equals(kv.Value.Name ?? "", needle, StringComparison.OrdinalIgnoreCase)) { rmSid = kv.Key; break; }
+                        }
+                    }
+                    if (parts.Length < 4 || rmSid <= 0)
+                    {
+                        Reply(caller, "[Buy/Bounty] Usage: /buy bounty remove <steamId|name>");
                         return;
                     }
                     // Re-read file first so we operate on the current on-disk state and

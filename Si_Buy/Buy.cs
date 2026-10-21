@@ -515,12 +515,22 @@ namespace Si_Buy
                     $"cooldown {Cfg.BuyCooldownSeconds.ToString("0", inv)} s | shrimp unlock {Cfg.ShrimpBuyUnlockSeconds.ToString("0", inv)} s | bounties {(Cfg.BountiesEnabled ? _bountyCfg.Bounties.Count + " active" : "off")} | admin-only {(Cfg.BuyAdminOnly ? "on" : "off")}",
                 };
                 Newtonsoft.Json.Linq.JArray OnOff() => new Newtonsoft.Json.Linq.JArray(new Newtonsoft.Json.Linq.JArray("on", "ON"), new Newtonsoft.Json.Linq.JArray("off", "OFF"));
-                Newtonsoft.Json.Linq.JObject E(string t, string l, string d, bool a, string? v = null, bool onOff = false)
+                Newtonsoft.Json.Linq.JObject E(string t, string l, string d, bool a, string? v = null, bool onOff = false, string arg = "", Newtonsoft.Json.Linq.JArray? ch = null)
                 {
                     var o = new Newtonsoft.Json.Linq.JObject { ["t"] = t, ["l"] = l, ["d"] = d, ["a"] = a };
                     if (v != null) o["v"] = v;
                     if (onOff) o["ch"] = OnOff();
+                    if (arg.Length > 0) o["arg"] = arg;
+                    if (ch != null && ch.Count > 0) o["ch"] = ch;
                     return o;
+                }
+                // Current bounties as picker choices on the ADMIN remove entry only (value = Steam ID, which remove takes).
+                // Steam IDs must never reach non-admins; the ModUI server drops admin entries from player frames.
+                var bountyChoices = new Newtonsoft.Json.Linq.JArray();
+                foreach (var kv in _bountyCfg.Bounties)
+                {
+                    int amt = kv.Value.Amount > 0 ? kv.Value.Amount : _bountyCfg.DefaultAmount;
+                    bountyChoices.Add(new Newtonsoft.Json.Linq.JArray(kv.Key.ToString(inv), (string.IsNullOrEmpty(kv.Value.Name) ? kv.Key.ToString(inv) : kv.Value.Name) + "   " + amt + "cr"));
                 }
                 doc["commands"] = new Newtonsoft.Json.Linq.JArray
                 {
@@ -532,10 +542,12 @@ namespace Si_Buy
                     E("/buy adminonly", "Admin-only buying", "Only admins may open the buy menu.", true, Cfg.BuyAdminOnly ? "on" : "off", true),
                     E("/buy bounty", "Bounties", "Pay a bounty to whoever kills a listed player.", true, Cfg.BountiesEnabled ? "on" : "off", true),
                     E("/buy bounty list", "List bounties", "The active bounties with amounts.", true),
-                    E("/buy bounty add", "Add bounty", "Arguments: Steam ID, amount, optional name.", true),
-                    E("/buy bounty remove", "Remove bounty", "Arguments: Steam ID.", true),
+                    E("/buy bounty add", "Add bounty", $"Pick the player, then the amount; leave it empty for the default {_bountyCfg.DefaultAmount}cr.", true, arg: "player,text?"),
+                    bountyChoices.Count > 0
+                        ? E("/buy bounty remove", "Remove bounty", "Pick the bounty to remove.", true, arg: "choice", ch: bountyChoices)
+                        : E("/buy bounty remove", "Remove bounty", "No bounties are set right now.", true),
                     E("/buy bounty reload", "Reload bounties", "Re-read Bounties.json.", true),
-                    E("/buy give", "Give credits", "Arguments: player name or Steam ID, then the amount (negative deducts).", true),
+                    E("/buy give", "Give credits", "Pick the player, then the amount; a negative amount deducts.", true, arg: "player,text"),
                 };
                 return Newtonsoft.Json.JsonConvert.SerializeObject(doc, Newtonsoft.Json.Formatting.None);
             }
