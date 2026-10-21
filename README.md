@@ -51,7 +51,7 @@ All gate on SilicaAdminMod's `CanAdminExecute(Power.Generic)` and work while the
 
 | Command | Effect |
 |--|--|
-| `/buy on` / `/buy off` | Master switch (`Enabled`). Balances are kept while off |
+| `/buy on` / `/buy off` (also `/buy enabled on\|off`) | Master switch (`Enabled`). Balances are kept while off |
 | `/buy starter <N>` | `StarterCreditsPerPlayer` per round, 0 disables |
 | `/buy give <steamId or name> <amount>` | Grant (or deduct, negative) credits |
 | `/buy buildingreward on\|off` | Structure-kill rewards |

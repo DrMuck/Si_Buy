@@ -488,27 +488,54 @@ namespace Si_Buy
         {
             try
             {
-                if (_unitFaction.Count == 0) return null;
-                var catalog = new Newtonsoft.Json.Linq.JObject();
-                foreach (string faction in new[] { "Sol", "Centauri", "Alien" })
+                var doc = new Newtonsoft.Json.Linq.JObject { ["cmd"] = "/buy", ["enabled"] = BuyActive, ["shrimpLock"] = (int)Cfg.ShrimpBuyUnlockSeconds };
+                // the catalog (needs the unit dump, loaded at the first round start)
+                if (_unitFaction.Count > 0)
                 {
-                    var cats = new Newtonsoft.Json.Linq.JArray();
-                    foreach (var cat in BuildCategories(faction))
+                    var catalog = new Newtonsoft.Json.Linq.JObject();
+                    foreach (string faction in new[] { "Sol", "Centauri", "Alien" })
                     {
-                        var units = new Newtonsoft.Json.Linq.JArray();
-                        foreach (var item in BuildUnits(faction, cat))
-                            units.Add(new Newtonsoft.Json.Linq.JArray(item.Display, item.Cost));
-                        if (units.Count > 0) cats.Add(new Newtonsoft.Json.Linq.JObject { ["c"] = cat, ["u"] = units });
+                        var cats = new Newtonsoft.Json.Linq.JArray();
+                        foreach (var cat in BuildCategories(faction))
+                        {
+                            var units = new Newtonsoft.Json.Linq.JArray();
+                            foreach (var item in BuildUnits(faction, cat))
+                                units.Add(new Newtonsoft.Json.Linq.JArray(item.Display, item.Cost));
+                            if (units.Count > 0) cats.Add(new Newtonsoft.Json.Linq.JObject { ["c"] = cat, ["u"] = units });
+                        }
+                        if (cats.Count > 0) catalog[faction] = cats;
                     }
-                    if (cats.Count > 0) catalog[faction] = cats;
+                    if (catalog.Count > 0) doc["catalog"] = catalog;
                 }
-                if (catalog.Count == 0) return null;
-                var doc = new Newtonsoft.Json.Linq.JObject
+                // status lines and the admin settings as switch / value rows; they mirror the /buy admin sub-commands
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                doc["info"] = new Newtonsoft.Json.Linq.JArray
                 {
-                    ["cmd"] = "/buy",
-                    ["enabled"] = BuyActive,
-                    ["shrimpLock"] = (int)Cfg.ShrimpBuyUnlockSeconds,
-                    ["catalog"] = catalog,
+                    $"Economy {(Cfg.Enabled ? "ON" : "OFF")} | starter {Cfg.StarterCreditsPerPlayer}cr | kill reward {Cfg.RewardKillFraction.ToString("P0", inv)} of cost | building reward {(Cfg.StructureKillRewardsEnabled ? "on" : "off")} | structures {(Cfg.BuyStructuresEnabled ? "on" : "off")}",
+                    $"cooldown {Cfg.BuyCooldownSeconds.ToString("0", inv)} s | shrimp unlock {Cfg.ShrimpBuyUnlockSeconds.ToString("0", inv)} s | bounties {(Cfg.BountiesEnabled ? _bountyCfg.Bounties.Count + " active" : "off")} | admin-only {(Cfg.BuyAdminOnly ? "on" : "off")}",
+                };
+                Newtonsoft.Json.Linq.JArray OnOff() => new Newtonsoft.Json.Linq.JArray(new Newtonsoft.Json.Linq.JArray("on", "ON"), new Newtonsoft.Json.Linq.JArray("off", "OFF"));
+                Newtonsoft.Json.Linq.JObject E(string t, string l, string d, bool a, string? v = null, bool onOff = false)
+                {
+                    var o = new Newtonsoft.Json.Linq.JObject { ["t"] = t, ["l"] = l, ["d"] = d, ["a"] = a };
+                    if (v != null) o["v"] = v;
+                    if (onOff) o["ch"] = OnOff();
+                    return o;
+                }
+                doc["commands"] = new Newtonsoft.Json.Linq.JArray
+                {
+                    E("/buy status", "Status", "Economy settings and your balance.", false),
+                    E("/buy enabled", "Economy", "ON: purchases, kill rewards, starter credits and bounties. OFF: balances kept, nothing paid or sold.", true, Cfg.Enabled ? "on" : "off", true),
+                    E("/buy starter", "Starter credits", "Credits every player gets at round start.", true, Cfg.StarterCreditsPerPlayer.ToString(inv)),
+                    E("/buy buildingreward", "Building-kill reward", "Destroying an enemy building pays the killer.", true, Cfg.StructureKillRewardsEnabled ? "on" : "off", true),
+                    E("/buy structures", "Buyable structures", "List buildable structures in a Buildings category.", true, Cfg.BuyStructuresEnabled ? "on" : "off", true),
+                    E("/buy adminonly", "Admin-only buying", "Only admins may open the buy menu.", true, Cfg.BuyAdminOnly ? "on" : "off", true),
+                    E("/buy bounty", "Bounties", "Pay a bounty to whoever kills a listed player.", true, Cfg.BountiesEnabled ? "on" : "off", true),
+                    E("/buy bounty list", "List bounties", "The active bounties with amounts.", true),
+                    E("/buy bounty add", "Add bounty", "Arguments: Steam ID, amount, optional name.", true),
+                    E("/buy bounty remove", "Remove bounty", "Arguments: Steam ID.", true),
+                    E("/buy bounty reload", "Reload bounties", "Re-read Bounties.json.", true),
+                    E("/buy give", "Give credits", "Arguments: player name or Steam ID, then the amount (negative deducts).", true),
                 };
                 return Newtonsoft.Json.JsonConvert.SerializeObject(doc, Newtonsoft.Json.Formatting.None);
             }

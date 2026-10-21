@@ -25,7 +25,7 @@ namespace Si_Buy
     public partial class Buy
     {
         static readonly string[] ADMIN_SUBS =
-            { "status", "on", "off", "starter", "give", "buildingreward", "structurereward", "structures", "buystructures", "buybuildings", "adminonly", "bounty", "help" };
+            { "status", "on", "off", "starter", "give", "buildingreward", "structurereward", "structures", "buystructures", "buybuildings", "adminonly", "bounty", "help", "enabled" };
 
         static bool IsAdminSub(string sub)
         {
@@ -59,6 +59,11 @@ namespace Si_Buy
 
             switch (sub)
             {
+                case "enabled":   // switch form of on/off (used by the Si_ModUI switch row)
+                    if (val == "on") goto case "on";
+                    if (val == "off") goto case "off";
+                    Reply(caller, $"[Buy] Economy {(Cfg.Enabled ? "ON" : "OFF")}. Usage: /buy enabled on|off");
+                    break;
                 case "on":
                     Cfg.Enabled = true; SaveConfig();
                     Reply(caller, "[Buy] Economy ON — /buy, kill rewards, starter credits and bounties are active.");
@@ -144,7 +149,7 @@ namespace Si_Buy
                     HandleBountySubcommand(caller, val, parts);
                     break;
                 default:
-                    Reply(caller, "/buy [status|on|off|starter <amount>|give <player> <amount>|buildingreward <on|off>|structures <on|off>|adminonly <on|off>|bounty (on|off|list|add|remove|reload)]");
+                    Reply(caller, "/buy [status|on|off|enabled <on|off>|starter <amount>|give <player> <amount>|buildingreward <on|off>|structures <on|off>|adminonly <on|off>|bounty (on|off|list|add|remove|reload)]");
                     break;
             }
             return true;
