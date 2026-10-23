@@ -31,7 +31,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(Si_Buy.Buy), "Buy", "1.3.1", "DrMuck")]
+[assembly: MelonInfo(typeof(Si_Buy.Buy), "Buy", "1.3.2", "DrMuck")]
 [assembly: MelonGame("Bohemia Interactive", "Silica")]
 [assembly: MelonOptionalDependencies("Admin Mod", "Si_UnitBalance")]
 
@@ -66,7 +66,7 @@ namespace Si_Buy
             // Headhunter bounty list (separate JSON next to the config).
             LoadBountyConfig();
 
-            MelonLogger.Msg($"[Buy] Si_Buy v1.3.1 loaded. Enabled={Cfg.Enabled} starter={Cfg.StarterCreditsPerPlayer}cr " +
+            MelonLogger.Msg($"[Buy] Si_Buy v1.3.2 loaded. Enabled={Cfg.Enabled} starter={Cfg.StarterCreditsPerPlayer}cr " +
                             $"killFraction={Cfg.RewardKillFraction:0.##} bounties={Cfg.BountiesEnabled} structures={Cfg.BuyStructuresEnabled}");
         }
 
@@ -103,6 +103,9 @@ namespace Si_Buy
             // Re-applied each round start so live config edits take effect on next round.
             ApplyUnitBalanceCostOverrides();
 
+            // Wipe balances at round START as well: a round that ends through a map change or a restart may never
+            // raise OnGameEnded, and leftovers would then stack on top of the new starter credits (300 -> 600).
+            if (Cfg.RewardResetOnGameEnd) { ResetAllCredits(); MelonLogger.Msg("[Buy] OnGameStarted - credits reset for the new round."); }
             _starterCreditsGranted.Clear();
             _starterCreditsCheckTimer = STARTER_CREDITS_CHECK_INTERVAL;
             if (!BuyActive) return;

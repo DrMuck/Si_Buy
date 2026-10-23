@@ -30,7 +30,7 @@ namespace Si_Buy
 
             // === Rewards ===
             public float RewardKillFraction = 0.10f;                 // killer gets this % of victim's effective cost
-            public bool  RewardResetOnGameEnd = true;                // wipe credits between rounds
+            public bool  RewardResetOnGameEnd = true;                // wipe credits between rounds (at round end AND at round start)
             public bool  StructureKillRewardsEnabled = true;         // destroying an enemy building pays the killer (cost * RewardKillFraction). /buy buildingreward on|off
 
             // === Purchase rules ===
