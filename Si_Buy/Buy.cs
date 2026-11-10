@@ -10,6 +10,7 @@
    /buy exit      → close menu
    /buy <C> <U>   → direct purchase: category C, item U (menu order), no menu opened
    /buy <name>    → direct purchase by display name, e.g. /buy Heavy Tank
+   /buy upgrade [move|primary|secondary] → unit upgrades, see Upgrades.cs
 
  We avoid /1-/20 player commands (Si_UnitBalanceUI owns those for !b / /stats, we hook the chat event instead).
  All navigation goes through /buy <subcmd> instead.
@@ -30,7 +31,7 @@ namespace Si_Buy
 {
     public partial class Buy
     {
-        enum BuyLevel { Closed, Categories, UnitList }
+        enum BuyLevel { Closed, Categories, UnitList, Upgrades }   // Upgrades: the /buy upgrade list (Upgrades.cs), /N buys stat N
 
         // One selectable row in the /buy unit/structure list. Carries its own resolved
         // prefab + cost so purchase never re-derives them from the display-name-keyed
@@ -50,6 +51,8 @@ namespace Si_Buy
             public string CategoryBuiltAt = "";                                // e.g. "Barracks" / "Light Factory"
             public List<BuyChoice> UnitsShown = new List<BuyChoice>();          // items in shown order (1-indexed via UI)
             public List<string> CategoriesShown = new List<string>();          // built_at names in shown order
+            public List<string> UpgradeKeys = new List<string>();              // Upgrades level: stat keys in shown order
+            public Unit? UpgradeUnit;                                          // ...for this unit (a different unit re-shows the list)
         }
 
         static readonly Dictionary<long, BuyState> _buyStates = new Dictionary<long, BuyState>();
@@ -67,6 +70,23 @@ namespace Si_Buy
         static bool IsShrimpUnit(string displayName)
             => !string.IsNullOrEmpty(displayName)
                && displayName.IndexOf("shrimp", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        // Sol / Centauri aircraft: everything the Air Factory builds (the unit dump's built_at).
+        static bool IsAirUnit(string displayName)
+            => !string.IsNullOrEmpty(displayName)
+               && _unitToBuilding.TryGetValue(displayName, out string builtAt)
+               && string.Equals(builtAt, "Air Factory", StringComparison.OrdinalIgnoreCase);
+
+        // Seconds until a locked unit (shrimp / aircraft) may be bought; 0 when it is free.
+        static float LockRemaining(string displayName)
+        {
+            float elapsed = RoundElapsedSeconds();
+            if (Cfg.ShrimpBuyUnlockSeconds > 0f && IsShrimpUnit(displayName) && elapsed < Cfg.ShrimpBuyUnlockSeconds)
+                return Cfg.ShrimpBuyUnlockSeconds - elapsed;
+            if (Cfg.AirBuyUnlockSeconds > 0f && IsAirUnit(displayName) && elapsed < Cfg.AirBuyUnlockSeconds)
+                return Cfg.AirBuyUnlockSeconds - elapsed;
+            return 0f;
+        }
 
         // Compact mm ss formatting for lock / cooldown messages.
         static string FormatMMSS(float seconds)
@@ -106,6 +126,9 @@ namespace Si_Buy
 
             // Admin / status sub-commands run before the gates so "/buy on" works while off.
             if (TryHandleAdminSub(caller, sub, parts)) return;
+
+            // Unit upgrades (Upgrades.cs) run their own gates: no cooldown, no distance rules, admin dump while off.
+            if (sub == "upgrade" || sub == "upg") { HandleUpgradeCommand(caller, parts); return; }
 
             if (!BuyActive)
             {
@@ -147,9 +170,9 @@ namespace Si_Buy
                 }
                 else
                 {
-                    // Already in menu — re-render current level.
+                    // Already in menu — re-render current level (the upgrade list goes back to the unit menu).
                     if (state.Level == BuyLevel.UnitList) ShowUnits(caller, state);
-                    else ShowCategories(caller, state);
+                    else { state.Level = BuyLevel.Categories; ShowCategories(caller, state); }
                 }
                 return;
             }
@@ -177,7 +200,12 @@ namespace Si_Buy
                     Reply(caller, "[Buy] Menu closed.");
                     return;
                 case "back":
-                    if (state.Level == BuyLevel.UnitList)
+                    if (state.Level == BuyLevel.Upgrades)
+                    {
+                        state.Level = BuyLevel.Closed;
+                        Reply(caller, "[Buy] Menu closed.");
+                    }
+                    else if (state.Level == BuyLevel.UnitList)
                     {
                         state.Level = BuyLevel.Categories;
                         ShowCategories(caller, state);
@@ -193,6 +221,11 @@ namespace Si_Buy
             // Numeric selection.
             if (int.TryParse(sub, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n) && n >= 1)
             {
+                if (state.Level == BuyLevel.Upgrades)
+                {
+                    BuyUpgradeFromMenu(caller, n);
+                    return;
+                }
                 if (state.Level == BuyLevel.Categories)
                 {
                     if (n > state.CategoriesShown.Count) { Reply(caller, "[Buy] Invalid choice."); return; }
@@ -488,7 +521,7 @@ namespace Si_Buy
         {
             try
             {
-                var doc = new Newtonsoft.Json.Linq.JObject { ["cmd"] = "/buy", ["enabled"] = BuyActive, ["shrimpLock"] = (int)Cfg.ShrimpBuyUnlockSeconds };
+                var doc = new Newtonsoft.Json.Linq.JObject { ["cmd"] = "/buy", ["enabled"] = BuyActive, ["shrimpLock"] = (int)Cfg.ShrimpBuyUnlockSeconds, ["airLock"] = (int)Cfg.AirBuyUnlockSeconds };
                 // the catalog (needs the unit dump, loaded at the first round start)
                 if (_unitFaction.Count > 0)
                 {
@@ -509,21 +542,33 @@ namespace Si_Buy
                 }
                 // status lines and the admin settings as switch / value rows; they mirror the /buy admin sub-commands
                 var inv = System.Globalization.CultureInfo.InvariantCulture;
-                doc["info"] = new Newtonsoft.Json.Linq.JArray
+                var infoLines = new Newtonsoft.Json.Linq.JArray
                 {
                     $"Economy {(Cfg.Enabled ? "ON" : "OFF")} | starter {Cfg.StarterCreditsPerPlayer}cr | kill reward {Cfg.RewardKillFraction.ToString("P0", inv)} of cost | building reward {(Cfg.StructureKillRewardsEnabled ? "on" : "off")} | structures {(Cfg.BuyStructuresEnabled ? "on" : "off")}",
-                    $"cooldown {Cfg.BuyCooldownSeconds.ToString("0", inv)} s | shrimp unlock {Cfg.ShrimpBuyUnlockSeconds.ToString("0", inv)} s | bounties {(Cfg.BountiesEnabled ? _bountyCfg.Bounties.Count + " active" : "off")} | admin-only {(Cfg.BuyAdminOnly ? "on" : "off")}",
+                    $"cooldown {Cfg.BuyCooldownSeconds.ToString("0", inv)} s | shrimp unlock {Cfg.ShrimpBuyUnlockSeconds.ToString("0", inv)} s | air unlock {Cfg.AirBuyUnlockSeconds.ToString("0", inv)} s | bounties {(Cfg.BountiesEnabled ? _bountyCfg.Bounties.Count + " active" : "off")} | admin-only {(Cfg.BuyAdminOnly ? "on" : "off")}",
+                    $"upgrades {(Cfg.UpgradesEnabled ? "ON" : "OFF")} | {StepSummary()} | max {Cfg.UpgradeMaxPerUnit} per unit | price {Cfg.UpgradeCostFraction.ToString("0.##", inv)} x unit cost, min {Cfg.UpgradeMinCost}cr",
                 };
+                // the kinds with their own step, so the "by stat" range above can be read in detail
+                string ownSteps = StepOverrides();
+                if (ownSteps.Length > 0)
+                    infoLines.Add($"upgrade steps: general {Cfg.UpgradeStepPercent.ToString("0.#", inv)}% | own: {ownSteps}");
+                doc["info"] = infoLines;
                 Newtonsoft.Json.Linq.JArray OnOff() => new Newtonsoft.Json.Linq.JArray(new Newtonsoft.Json.Linq.JArray("on", "ON"), new Newtonsoft.Json.Linq.JArray("off", "OFF"));
-                Newtonsoft.Json.Linq.JObject E(string t, string l, string d, bool a, string? v = null, bool onOff = false, string arg = "", Newtonsoft.Json.Linq.JArray? ch = null)
+                // g = section heading, rw = row id (Si_ModUI server 1.8.0 / client 1.7.0 draw headings and put entries with the
+                // same row id on one line; older ones ignore both and list every entry as its own complete row)
+                Newtonsoft.Json.Linq.JObject E(string t, string l, string d, bool a, string? v = null, bool onOff = false, string arg = "", Newtonsoft.Json.Linq.JArray? ch = null, string? g = null, string? rw = null)
                 {
                     var o = new Newtonsoft.Json.Linq.JObject { ["t"] = t, ["l"] = l, ["d"] = d, ["a"] = a };
                     if (v != null) o["v"] = v;
                     if (onOff) o["ch"] = OnOff();
                     if (arg.Length > 0) o["arg"] = arg;
                     if (ch != null && ch.Count > 0) o["ch"] = ch;
+                    if (g != null) o["g"] = g;
+                    if (rw != null) o["rw"] = rw;
                     return o;
                 }
+                const string G_ECON = "Economy", G_UPG = "Unit upgrades",
+                             G_MOVE = "Upgrade stats: Movement (one purchase raises all three)", G_WEAP = "Upgrade stats: Weapon (primary and secondary each)";
                 // Current bounties as picker choices on the ADMIN remove entry only (value = Steam ID, which remove takes).
                 // Steam IDs must never reach non-admins; the ModUI server drops admin entries from player frames.
                 var bountyChoices = new Newtonsoft.Json.Linq.JArray();
@@ -532,23 +577,67 @@ namespace Si_Buy
                     int amt = kv.Value.Amount > 0 ? kv.Value.Amount : _bountyCfg.DefaultAmount;
                     bountyChoices.Add(new Newtonsoft.Json.Linq.JArray(kv.Key.ToString(inv), (string.IsNullOrEmpty(kv.Value.Name) ? kv.Key.ToString(inv) : kv.Value.Name) + "   " + amt + "cr"));
                 }
-                doc["commands"] = new Newtonsoft.Json.Linq.JArray
+                var commands = new Newtonsoft.Json.Linq.JArray
                 {
                     E("/buy status", "Status", "Economy settings and your balance.", false),
-                    E("/buy enabled", "Economy", "ON: purchases, kill rewards, starter credits and bounties. OFF: balances kept, nothing paid or sold.", true, Cfg.Enabled ? "on" : "off", true),
-                    E("/buy starter", "Starter credits", "Credits every player gets at round start.", true, Cfg.StarterCreditsPerPlayer.ToString(inv)),
-                    E("/buy buildingreward", "Building-kill reward", "Destroying an enemy building pays the killer.", true, Cfg.StructureKillRewardsEnabled ? "on" : "off", true),
-                    E("/buy structures", "Buyable structures", "List buildable structures in a Buildings category.", true, Cfg.BuyStructuresEnabled ? "on" : "off", true),
-                    E("/buy adminonly", "Admin-only buying", "Only admins may open the buy menu.", true, Cfg.BuyAdminOnly ? "on" : "off", true),
-                    E("/buy bounty", "Bounties", "Pay a bounty to whoever kills a listed player.", true, Cfg.BountiesEnabled ? "on" : "off", true),
-                    E("/buy bounty list", "List bounties", "The active bounties with amounts.", true),
-                    E("/buy bounty add", "Add bounty", $"Pick the player, then the amount; leave it empty for the default {_bountyCfg.DefaultAmount}cr.", true, arg: "player,text?"),
+                    E("/buy enabled", "Economy", "ON: purchases, kill rewards, starter credits and bounties. OFF: balances kept, nothing paid or sold.", true, Cfg.Enabled ? "on" : "off", true, g: G_ECON),
+                    E("/buy starter", "Starter credits", "Credits every player gets at round start.", true, Cfg.StarterCreditsPerPlayer.ToString(inv), g: G_ECON),
+                    E("/buy buildingreward", "Building-kill reward", "Destroying an enemy building pays the killer.", true, Cfg.StructureKillRewardsEnabled ? "on" : "off", true, g: G_ECON),
+                    E("/buy structures", "Buyable structures", "List buildable structures in a Buildings category.", true, Cfg.BuyStructuresEnabled ? "on" : "off", true, g: G_ECON),
+                    E("/buy adminonly", "Admin-only buying", "Only admins may open the buy menu.", true, Cfg.BuyAdminOnly ? "on" : "off", true, g: G_ECON),
+                    E("/buy bounty", "Bounties", "Pay a bounty to whoever kills a listed player.", true, Cfg.BountiesEnabled ? "on" : "off", true, g: G_ECON),
+                    E("/buy bounty list", "List bounties", "The active bounties with amounts.", true, g: G_ECON),
+                    E("/buy bounty add", "Add bounty", $"Pick the player, then the amount; leave it empty for the default {_bountyCfg.DefaultAmount}cr.", true, arg: "player,text?", g: G_ECON),
                     bountyChoices.Count > 0
-                        ? E("/buy bounty remove", "Remove bounty", "Pick the bounty to remove.", true, arg: "choice", ch: bountyChoices)
-                        : E("/buy bounty remove", "Remove bounty", "No bounties are set right now.", true),
-                    E("/buy bounty reload", "Reload bounties", "Re-read Bounties.json.", true),
-                    E("/buy give", "Give credits", "Pick the player, then the amount; a negative amount deducts.", true, arg: "player,text"),
+                        ? E("/buy bounty remove", "Remove bounty", "Pick the bounty to remove.", true, arg: "choice", ch: bountyChoices, g: G_ECON)
+                        : E("/buy bounty remove", "Remove bounty", "No bounties are set right now.", true, g: G_ECON),
+                    E("/buy bounty reload", "Reload bounties", "Re-read Bounties.json.", true, g: G_ECON),
+                    E("/buy give", "Give credits", "Pick the player, then the amount; a negative amount deducts.", true, arg: "player,text", g: G_ECON),
+                    E("/buy upgrades", "Unit upgrades", "Players buy Movement and single weapon stats for the unit they control.", true, Cfg.UpgradesEnabled ? "on" : "off", true, g: G_UPG),
+                    E("/buy upgradestep", "General step %", "Percent of the base value per level for every stat that has no own step below.", true, Cfg.UpgradeStepPercent.ToString("0.#", inv), g: G_UPG),
+                    E("/buy upgrademax", "Levels per unit", "Sum of all upgrade levels on one unit (Movement counts as one item).", true, Cfg.UpgradeMaxPerUnit.ToString(inv), g: G_UPG),
+                    E("/buy upgradecost", "Price factor", "Price of one level = the unit's buy cost x this.", true, Cfg.UpgradeCostFraction.ToString("0.##", inv), g: G_UPG),
+                    E("/buy upgrademincost", "Minimum price (cr)", "Price floor, also used for units without a known cost.", true, Cfg.UpgradeMinCost.ToString(inv), g: G_UPG),
+                    E("/buy upgradeswapspeed", "Refit speed limit (m/s)", "Upgrades that refit the unit (movement, rate of fire, reload, accuracy, magazine) need it below this speed.", true, Cfg.UpgradeMaxSwapSpeed.ToString("0.#", inv), g: G_UPG),
                 };
+                // One line per stat: its switch, its step % (the value in force; "(general)" while it follows the general step)
+                // and, when it has an own step, a button back to the general value. Each piece is a complete command, so an
+                // older client shows them as three rows that still set everything. Chat: /buy upgradestat, /buy upgradestep.
+                foreach (string kind in UPG_KINDS)
+                {
+                    string label = UpgStatAdminLabel(kind), rowId = "upg." + kind;
+                    string grp = kind == "move" || kind == "jump" || kind == "turn" ? G_MOVE : G_WEAP;
+                    bool own = ValidStep(StepOverride(kind));
+                    string excluded = ExclusionList(kind);
+                    commands.Add(E("/buy upgradestat " + kind, label, UpgStatHint(kind) + (excluded.Length > 0 ? " Not offered for: " + excluded + "." : ""),
+                        true, UpgStatEnabled(kind) ? "on" : "off", true, g: grp, rw: rowId));
+                    // The field holds a number only when the stat has its own step; while it follows the general step it
+                    // reads "general". A number shown there would go stale when the general step changes (an older client
+                    // never refreshes a typed field) and a later SET would pin the old general value as an own step (1.9.1).
+                    commands.Add(E("/buy upgradestep " + kind, label + " step %" + (own ? "" : " (follows general " + Cfg.UpgradeStepPercent.ToString("0.#", inv) + "%)"),
+                        own ? "Own step of this stat; type general to follow the general step again." : "Follows the general step; type a number and SET to give it an own step.",
+                        true, own ? StepOverride(kind).ToString("0.#", inv) : "general", g: grp, rw: rowId));
+                    if (own)
+                        commands.Add(E("/buy upgradestep " + kind + " default", label + ": use general (" + Cfg.UpgradeStepPercent.ToString("0.#", inv) + "%)",
+                            "Drop the own step; the stat follows the general step again.", true, g: grp, rw: rowId));
+                }
+                // Exclusion editor (1.9.1): a stat selector, then one ON/OFF toggle per production building and per buyable
+                // unit (grouped by faction) for the selected stat. The selection is per admin (server side); the ModUI server
+                // fills each admin's own selector value, toggle states and "via <building>" labels from ModUIPlayerData, so
+                // the shared rows below carry the state of the default stat (magazine). Every row is a plain switch: older
+                // clients and servers list them flat and still set everything.
+                foreach (var row in ExclusionEditorRows(ExclusionPickDefault))
+                {
+                    var o = E(row.Text, row.Label, row.Desc, true, row.Value, ch: row.Choices, g: row.Group);
+                    commands.Add(o);
+                }
+                // Player row. Clients with the upgrade section (Si_ModUI client 1.6.0) show the per-player "actions" panel from
+                // ModUIPlayerData; older clients open this as a reply page whose numbered lines buy through the /N menu.
+                if (Cfg.UpgradesEnabled)
+                    commands.Insert(1, E("/buy upgrade", "Upgrade your unit",
+                        $"Movement and single weapon stats of the unit you control: {StepSummary()}, {Cfg.UpgradeMaxPerUnit} levels per unit, {Cfg.UpgradeCostFraction.ToString("0.##", inv)} x its cost (min {Cfg.UpgradeMinCost}cr).",
+                        false));
+                doc["commands"] = commands;
                 return Newtonsoft.Json.JsonConvert.SerializeObject(doc, Newtonsoft.Json.Formatting.None);
             }
             catch (Exception ex)
@@ -579,6 +668,8 @@ namespace Si_Buy
                 int unitCount = CountUnitsInCategoryForFaction(ordered[i], faction);
                 Reply(caller, $"  {i + 1}. {ordered[i]} ({unitCount})");
             }
+            if (Cfg.UpgradesEnabled)
+                Reply(caller, $"  Upgrade the unit you control ({StepSummary()}): <color={COLOR_AFFORD}>/buy upgrade</color>");
             Reply(caller, "/1-/N drill in  ·  /0 to close  (or /buy <N>)");
         }
 
@@ -590,7 +681,6 @@ namespace Si_Buy
             var items = BuildUnits(faction, state.CategoryBuiltAt);
             state.UnitsShown = items;
 
-            float shrimpRemain = Cfg.ShrimpBuyUnlockSeconds > 0f ? Cfg.ShrimpBuyUnlockSeconds - RoundElapsedSeconds() : 0f;
             Reply(caller, $"[Buy] === {state.CategoryBuiltAt} === Credits: <color={COLOR_AFFORD}>{credits}</color>");
 
             // Heads-up when the player is standing outside the base leash — otherwise a
@@ -601,10 +691,10 @@ namespace Si_Buy
             for (int i = 0; i < items.Count; i++)
             {
                 var it = items[i];
-                bool locked = shrimpRemain > 0f && IsShrimpUnit(it.Display);
-                if (locked)
+                float lockRemain = LockRemaining(it.Display);
+                if (lockRemain > 0f)
                 {
-                    Reply(caller, $"  {i + 1}. <color={COLOR_TOOEXPENSIVE}>{it.Display}</color>  <color={COLOR_TOOEXPENSIVE}>LOCKED — unlocks in {FormatMMSS(shrimpRemain)}</color>");
+                    Reply(caller, $"  {i + 1}. <color={COLOR_TOOEXPENSIVE}>{it.Display}</color>  <color={COLOR_TOOEXPENSIVE}>LOCKED — unlocks in {FormatMMSS(lockRemain)}</color>");
                     continue;
                 }
                 string color = it.Cost <= credits ? COLOR_AFFORD : COLOR_TOOEXPENSIVE;
@@ -628,16 +718,13 @@ namespace Si_Buy
                 return;
             }
 
-            // #1 — Shrimp time lock: no shrimps until ShrimpBuyUnlockSeconds into the round.
-            if (Cfg.ShrimpBuyUnlockSeconds > 0f && IsShrimpUnit(unitName))
+            // #1 — Time locks: no shrimps until ShrimpBuyUnlockSeconds, no Sol/Centauri aircraft until AirBuyUnlockSeconds.
+            float lockRemain = LockRemaining(unitName);
+            if (lockRemain > 0f)
             {
-                float elapsed = RoundElapsedSeconds();
-                if (elapsed < Cfg.ShrimpBuyUnlockSeconds)
-                {
-                    float remain = Cfg.ShrimpBuyUnlockSeconds - elapsed;
-                    Reply(caller, $"[Buy] {unitName} is locked for the first {FormatMMSS(Cfg.ShrimpBuyUnlockSeconds)} of the round — unlocks in {FormatMMSS(remain)}. <color={COLOR_TOOEXPENSIVE}>Credits not charged.</color>");
-                    return;
-                }
+                float lockTotal = IsShrimpUnit(unitName) ? Cfg.ShrimpBuyUnlockSeconds : Cfg.AirBuyUnlockSeconds;
+                Reply(caller, $"[Buy] {unitName} is locked for the first {FormatMMSS(lockTotal)} of the round — unlocks in {FormatMMSS(lockRemain)}. <color={COLOR_TOOEXPENSIVE}>Credits not charged.</color>");
+                return;
             }
 
             // #3 — Anti-spam cooldown: one purchase per BuyCooldownSeconds per player.
@@ -652,7 +739,8 @@ namespace Si_Buy
                 }
             }
 
-            if (credits < cost)
+            // Short of credits: a funding provider (Si_Market coins) may cover the rest; it only sells once the spawn worked.
+            if (credits < cost && !TryFund(key, cost - credits, false))
             {
                 Reply(caller, $"[Buy] Insufficient credits — {unitName} costs {cost}, you have {credits}.");
                 return;
@@ -679,17 +767,36 @@ namespace Si_Buy
                 return;
             }
 
-            // Spawn position: BuySpawnDistance metres in front of player's facing.
-            // Use SampleSurfaceY_NearAnchor (not the generic SampleSurfaceY which casts
-            // from terrain+200m and accepts any collider hit) to avoid the spawn-in-sky
-            // bug where a flying unit / projectile between sky and ground was being
-            // returned as the surface.
+            // Spawn position (Placement.cs): a free floor spot ahead of the buyer, never inside a unit or
+            // building, never under a roof, never on a hidden heightmap below the real floor. Structures use the
+            // game's own placement rules and take the flattest valid spot within StructureSpawnSearchRadius.
             Vector3 origin = controlled.transform.position;
             Vector3 fwd = controlled.transform.forward;
-            float dist = Mathf.Max(2f, Cfg.BuySpawnDistance);
-            Vector3 xz = origin + fwd * dist;
-            float groundY = SampleSurfaceY_NearAnchor(Terrain.activeTerrain, xz.x, xz.z, origin.y) + 2f;
-            Vector3 pos = new Vector3(xz.x, groundY, xz.z);
+            Vector3 pos;
+            Quaternion rot = Quaternion.LookRotation(Flat(controlled.transform.forward));   // upright, the buyer's heading
+            string placeNote;
+            bool hasRules = false; string sWhy = ""; float hang = 0f, sDist = 0f;
+            if (choice.IsStructure && FindStructureSpot(prefab, origin, fwd, out pos, out rot, out hang, out sDist, out hasRules, out sWhy))
+            {
+                placeNote = $"structure placed {sDist:F0}m away, foundation hang {hang:F1}m";
+            }
+            else if (choice.IsStructure && hasRules)
+            {
+                Reply(caller, $"[Buy] No valid spot for {unitName} within {Cfg.StructureSpawnSearchRadius:F0}m of you ({sWhy}). Move to flat, open ground and try again. <color={COLOR_TOOEXPENSIVE}>Credits not charged.</color>");
+                MelonLogger.Msg($"[Buy] {caller.PlayerName}: no structure spot for {unitName} at ({origin.x:F0},{origin.z:F0}): {sWhy}");
+                return;
+            }
+            else
+            {
+                if (!FindUnitSpot(origin, fwd, RadiusOf(controlled), RadiusOf(prefab), out Vector3 spot, out float uDist, out string uWhy))
+                {
+                    Reply(caller, $"[Buy] No free spot for {unitName} within {Cfg.BuySpawnSearchRadius:F0}m of you ({uWhy}). Move to open ground and try again. <color={COLOR_TOOEXPENSIVE}>Credits not charged.</color>");
+                    MelonLogger.Msg($"[Buy] {caller.PlayerName}: no unit spot for {unitName} at ({origin.x:F0},{origin.z:F0}): {uWhy}");
+                    return;
+                }
+                pos = spot + Vector3.up * 2f;
+                placeNote = $"placed {uDist:F0}m away";
+            }
 
             // Anti-rush: refuse purchase if the spawn would land too close to ANY enemy critical
             // (HQ / Nest / Queen). Bypass when configured radius is 0.
@@ -709,7 +816,7 @@ namespace Si_Buy
             GameObject? spawned = null;
             try
             {
-                spawned = Game.SpawnPrefab(prefab, null, caller.Team, pos, controlled.transform.rotation, true, true);
+                spawned = Game.SpawnPrefab(prefab, null, caller.Team, pos, rot, true, true);
             }
             catch (Exception ex)
             {
@@ -722,12 +829,15 @@ namespace Si_Buy
                 return;
             }
 
+            int have = GetCredits(key);
+            if (have < cost && !TryFund(key, cost - have, true))
+                MelonLogger.Warning($"[Buy] Funding provider promised {cost - have}cr for {caller.PlayerName} but did not deliver; charged the {have}cr there were.");
             AddCredits(key, -cost);
             _lastPurchaseTime[key] = Time.time;   // #3 — start anti-spam cooldown
             int newCredits = GetCredits(key);
             string cooldownNote = Cfg.BuyCooldownSeconds > 0f ? $" Next buy in {FormatMMSS(Cfg.BuyCooldownSeconds)}." : "";
             Reply(caller, $"[Buy] Purchased <color={COLOR_AFFORD}>{unitName}</color> for {cost}cr. Remaining: {newCredits}cr.{cooldownNote}");
-            MelonLogger.Msg($"[Buy] {caller.PlayerName} bought {unitName} ({prefabName}) for {cost}cr. Spawned at ({pos.x:F0},{pos.z:F0}).");
+            MelonLogger.Msg($"[Buy] {caller.PlayerName} bought {unitName} ({prefabName}) for {cost}cr. Spawned at ({pos.x:F0},{pos.y:F0},{pos.z:F0}), {placeNote}.");
         }
 
         // === Helpers ===
@@ -767,9 +877,11 @@ namespace Si_Buy
             return n;
         }
 
+        const string NEST_OBJECT_INFO = "ObjectInfo_Alien_Nest";
+
         /// <summary>
         /// Returns true if <paramref name="spawnPos"/> is within Cfg.BuyMinDistanceFromEnemyCritical
-        /// of any critical structure or unit belonging to a team that isn't the player's.
+        /// of any HQ, Nest or critical unit (Queen) belonging to a team that isn't the player's.
         /// Skips neutral teams (Gamemaster/Wildlife). Uses CYLINDRICAL (horizontal/radial,
         /// XZ-plane) distance so altitude is ignored — buying in high orbit directly above
         /// an enemy HQ/Nest is blocked exactly the same as buying at ground level next to it.
@@ -798,7 +910,7 @@ namespace Si_Buy
                         {
                             var s = structs[i];
                             if (s == null || s.IsDestroyed) continue;
-                            if (s.ObjectInfo == null || !s.ObjectInfo.Critical) continue;
+                            if (!IsBaseStructure(s)) continue;
                             float d = HorizontalDistance(spawnPos, s.transform.position);
                             if (d < minDist && d < distance)
                             {
@@ -835,7 +947,7 @@ namespace Si_Buy
 
         /// <summary>
         /// Returns true if <paramref name="spawnPos"/> is FURTHER than
-        /// Cfg.BuyMaxDistanceFromOwnCritical from every critical structure the player's team
+        /// Cfg.BuyMaxDistanceFromOwnCritical from every HQ / Nest the player's team
         /// owns (HQ / Nest). Keeps /buy a base-reinforcement tool rather than a
         /// spawn-an-army-anywhere button. Uses the same CYLINDRICAL (XZ-plane) distance as the
         /// enemy-proximity gate, so altitude can't be used to dodge it.
@@ -843,7 +955,7 @@ namespace Si_Buy
         /// Only STRUCTURES anchor the bubble — the alien Queen is critical but mobile, and
         /// anchoring on her would let an alien team carry its buy zone across the map.
         ///
-        /// Fails OPEN (returns false) when the team owns no critical structure at all: a team
+        /// Fails OPEN (returns false) when the team owns no HQ / Nest at all: a team
         /// that just lost its last nest shouldn't also lose access to /buy.
         /// </summary>
         static bool IsTooFarFromOwnCritical(Player player, Vector3 spawnPos, out float distance)
@@ -866,7 +978,7 @@ namespace Si_Buy
                     {
                         var s = structs[i];
                         if (s == null || s.IsDestroyed) continue;
-                        if (s.ObjectInfo == null || !s.ObjectInfo.Critical) continue;
+                        if (!IsBaseStructure(s)) continue;
                         anchors++;
                         float d = HorizontalDistance(spawnPos, s.transform.position);
                         if (d < distance) distance = d;
@@ -886,6 +998,18 @@ namespace Si_Buy
             }
 
             return distance > maxDist;
+        }
+
+        /// <summary>
+        /// True for the structures both buy gates measure against: HQs and Nests. The game sets
+        /// ObjectInfo.Critical on HQs but not on the Nest (for Aliens only the Queen, a unit, is
+        /// critical), so the flag alone leaves Aliens without a base leash and Nests unprotected.
+        /// </summary>
+        static bool IsBaseStructure(Structure s)
+        {
+            var info = s.ObjectInfo;
+            if (info == null) return false;
+            return info.Critical || string.Equals(info.name, NEST_OBJECT_INFO, StringComparison.OrdinalIgnoreCase);
         }
 
         // Horizontal (XZ-plane) distance — ignores altitude so the no-buy zone is

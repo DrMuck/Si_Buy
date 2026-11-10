@@ -9,6 +9,8 @@
    Si_Buy.Buy.SpendCredits(long steamId, int amount, string reason)         -> bool
    Si_Buy.Buy.GetCreditsBySteamId(long steamId)                             -> int
    Si_Buy.Buy.GetCredits(Player player)                                     -> int
+   Si_Buy.Buy.RegisterFundingProvider(Func<long,int,bool,bool> provider)            (1.4.0) /buy shortfall cover, see Rewards.cs
+   Si_Buy.Buy.GetUpgradeFactor(Unit unit, string stat)                      -> float (1.6.0) unit upgrade in force, see Upgrades.cs
 
  Consumers resolve the type by name via reflection (no compile-time dependency):
    AppDomain.CurrentDomain.GetAssemblies() ... asm.GetType("Si_Buy.Buy")
@@ -17,7 +19,7 @@
 
  Credit sources: starter credits, kill rewards, structure-kill rewards, headhunter
  bounties, and anything another mod grants (Si_Logistics delivery bonus,
- Si_KingOfTheHill zone presence). Credit sink: /buy.
+ Si_KingOfTheHill zone presence, Si_Market coin sales). Credit sinks: /buy, Si_Market coin purchases.
 
  Server-only mod (no client component required).
  Deploy: <server>\Mods\Si_Buy.dll
@@ -31,7 +33,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(Si_Buy.Buy), "Buy", "1.3.2", "DrMuck")]
+[assembly: MelonInfo(typeof(Si_Buy.Buy), "Buy", "1.9.1", "DrMuck")]
 [assembly: MelonGame("Bohemia Interactive", "Silica")]
 [assembly: MelonOptionalDependencies("Admin Mod", "Si_UnitBalance")]
 
@@ -56,6 +58,7 @@ namespace Si_Buy
         {
             _configPath = Path.Combine(Paths.ConfigDir, "Si_Buy_Config.json");
             LoadConfig();
+            if (MigrateUpgradeConfig() | SanitizeUpgradeSteps() | SanitizeUpgradeExclusions()) SaveConfig();   // non-short-circuit: all always run
 
             // Reward system (kill events).
             HookRewards();
@@ -66,8 +69,12 @@ namespace Si_Buy
             // Headhunter bounty list (separate JSON next to the config).
             LoadBountyConfig();
 
-            MelonLogger.Msg($"[Buy] Si_Buy v1.3.2 loaded. Enabled={Cfg.Enabled} starter={Cfg.StarterCreditsPerPlayer}cr " +
-                            $"killFraction={Cfg.RewardKillFraction:0.##} bounties={Cfg.BountiesEnabled} structures={Cfg.BuyStructuresEnabled}");
+            // Unit upgrades: unit / player events, and re-sending held boosts after a full override sync.
+            HookUpgrades();
+            PatchUpgradeSync(HarmonyInstance);
+
+            MelonLogger.Msg($"[Buy] Si_Buy v1.9.1 loaded. Enabled={Cfg.Enabled} starter={Cfg.StarterCreditsPerPlayer}cr " +
+                            $"killFraction={Cfg.RewardKillFraction:0.##} bounties={Cfg.BountiesEnabled} structures={Cfg.BuyStructuresEnabled} upgrades={Cfg.UpgradesEnabled}");
         }
 
         public override void OnLateInitializeMelon()
@@ -87,6 +94,10 @@ namespace Si_Buy
             GameEvents.OnGameEnded += OnGameEnded;
             ReHookRewards();
             ReHookBuyChat();
+            ReHookUpgrades();
+            // New level: unit references and prefab profiles are stale; every client reverts all overrides
+            // while loading (GameLevelLoader.LoadAsyncScene: OverrideManager.RevertAll), so nothing to send.
+            ResetUpgrades(false);
         }
 
         static void OnGameStarted(GameMode mode)
@@ -108,6 +119,8 @@ namespace Si_Buy
             if (Cfg.RewardResetOnGameEnd) { ResetAllCredits(); MelonLogger.Msg("[Buy] OnGameStarted - credits reset for the new round."); }
             _starterCreditsGranted.Clear();
             _starterCreditsCheckTimer = STARTER_CREDITS_CHECK_INTERVAL;
+            // Upgrades never carry into a new round (a restart on the same map raises no scene load).
+            ResetUpgrades(true);
             if (!BuyActive) return;
 
             MelonLogger.Msg($"[Buy] OnGameStarted — map={UnityEngine.SceneManagement.SceneManager.GetActiveScene().name}");
@@ -120,6 +133,8 @@ namespace Si_Buy
             if (Cfg.RewardResetOnGameEnd) ResetAllCredits();
             // Clear any active buy menus so they don't carry stale state across rounds.
             ResetBuyState();
+            // Unit upgrades end with the round: buyers' clients get their held damage values reverted.
+            ResetUpgrades(true);
             // Re-announce bounties at the start of the next round.
             _announcedBounties.Clear();
             MelonLogger.Msg("[Buy] OnGameEnded — menus cleared" + (Cfg.RewardResetOnGameEnd ? ", credits reset." : "."));
@@ -128,6 +143,8 @@ namespace Si_Buy
         public override void OnUpdate()
         {
             if (!NetworkGameServer.GetServerStarted()) return;
+            // Unit upgrades: deferred re-sends and record pruning (cheap when nothing is upgraded).
+            try { UpgradesTick(); } catch (Exception ex) { MelonLogger.Warning($"[Buy] UpgradesTick threw: {ex.Message}"); }
             if (!BuyActive) return;
 
             // Starter-credits + bounty-announcement poll. Both walk Player.Players,

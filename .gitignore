@@ -9,3 +9,10 @@ include/
 *.user
 .vs/
 .idea/
+
+# Local tooling / release archives
+.codebase-memory/
+*.zip
+*.7z
+bin/
+obj/

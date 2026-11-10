@@ -13,11 +13,18 @@
    /buy structures on|off              'Buildings' category in the menu
    /buy adminonly on|off               restrict /buy to admins
    /buy bounty [on|off|list|reload|add <steamId> <amount> [name]|remove <steamId>]
+   /buy upgrades on|off                unit upgrades (Upgrades.cs)
+   /buy upgradestep [<kind>] <percent|default>   general step, or one kind's own step
+   /buy upgrademax|upgradecost|upgrademincost|upgradeswapspeed <value>
+   /buy upgradestat <stat> [on|off]    which stats can be upgraded (no on|off = toggle)
+   /buy upgradeexclude [<stat> [add|remove <building or unit>]]   stats not offered for some units
+   /buy upgrade dump                   upgrade diagnostic file (handled in Upgrades.cs)
 */
 
 using MelonLoader;
 using SilicaAdminMod;
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 
 namespace Si_Buy
@@ -25,7 +32,172 @@ namespace Si_Buy
     public partial class Buy
     {
         static readonly string[] ADMIN_SUBS =
-            { "status", "on", "off", "starter", "give", "buildingreward", "structurereward", "structures", "buystructures", "buybuildings", "adminonly", "bounty", "help", "enabled" };
+            { "status", "on", "off", "starter", "give", "buildingreward", "structurereward", "structures", "buystructures", "buybuildings", "adminonly", "bounty", "help", "enabled",
+              "upgrades", "upgradestep", "upgradesteps", "upgrademax", "upgradecost", "upgrademincost", "upgradeswapspeed", "upgradestat", "upgradeexclude" };
+
+        /// <summary>
+        /// /buy upgradeexclude                                  list every stat's exclusions
+        /// /buy upgradeexclude &lt;kind&gt;                           one stat
+        /// /buy upgradeexclude &lt;kind&gt; add|remove &lt;name&gt;         name = production building or unit (or building:X / unit:X)
+        /// /buy upgradeexclude add|remove &lt;kind&gt; &lt;name&gt;         same, the order the ModUI picker rows send
+        /// </summary>
+        static void HandleUpgradeExclude(Player? caller, string[] parts)
+        {
+            string a = parts.Length > 2 ? parts[2].ToLowerInvariant() : "";
+            string b = parts.Length > 3 ? parts[3].ToLowerInvariant() : "";
+            long sid = caller != null ? GetPlayerSteamId(caller) : 0;
+            // ModUI editor forms (1.9.1): "pick <kind>" selects the stat the toggles edit, "set <entry> on|off" sets one toggle
+            if (a == "pick")
+            {
+                if (Array.IndexOf(UPG_KINDS, b) < 0) { Reply(caller, $"[Buy] Usage: /buy upgradeexclude pick <{string.Join("|", UPG_KINDS)}>"); return; }
+                _exclPick[sid] = b;
+                string now = ExclusionList(b);
+                Reply(caller, $"[Buy] Editing exclusions of {UpgStatAdminLabel(b)}: {(now.Length > 0 ? "not offered for " + now : "offered for every unit")}.");
+                return;
+            }
+            if (a == "set")
+            {
+                string last = parts.Length > 4 ? parts[parts.Length - 1].ToLowerInvariant() : "";
+                bool? on = ParseOnOff(last);
+                string target = on.HasValue ? string.Join(" ", parts, 3, parts.Length - 4).Trim() : "";
+                if (!on.HasValue || target.Length == 0) { Reply(caller, "[Buy] Usage: /buy upgradeexclude set <building:X|unit:X> on|off  (edits the stat picked with /buy upgradeexclude pick)"); return; }
+                SetExclusion(caller, ExclusionPickFor(sid), target, on.Value);
+                return;
+            }
+            string kind, op; int nameAt;
+            if ((a == "add" || a == "remove" || a == "rm") && Array.IndexOf(UPG_KINDS, b) >= 0) { op = a; kind = b; nameAt = 4; }
+            else { kind = a; op = b; nameAt = 4; }
+            string usage = $"Usage: /buy upgradeexclude [<{string.Join("|", UPG_KINDS)}> [add|remove|toggle <building or unit>]]";
+            if (kind.Length == 0)
+            {
+                Reply(caller, "[Buy] Upgrade exclusions (stat not offered for these units):");
+                foreach (var k in UPG_KINDS)
+                {
+                    string l = ExclusionList(k);
+                    if (l.Length > 0) Reply(caller, $"  {k}: {l}");
+                }
+                if (string.IsNullOrEmpty(ExclusionSummary())) Reply(caller, "  none");
+                Reply(caller, usage);
+                return;
+            }
+            if (Array.IndexOf(UPG_KINDS, kind) < 0) { Reply(caller, "[Buy] " + usage); return; }
+            var list = Cfg.UpgradeExclusions[kind];
+            if (op.Length == 0) { Reply(caller, $"[Buy] {kind} is not offered for: {(list.Count > 0 ? string.Join(", ", list) : "nothing excluded")}. {usage}"); return; }
+            string name = parts.Length > nameAt ? string.Join(" ", parts, nameAt, parts.Length - nameAt).Trim() : "";
+            if (name.Length > 0 && op == "toggle")
+            {
+                string toggled = ResolveExclusionName(name, out string te, out _) ? te : name;
+                SetExclusion(caller, kind, name, !(IsExcludedDirect(kind, toggled) || (TryParseExclusion(toggled, out string tt, out string tn) && tt == EXCL_UNIT && ExcludedVia(kind, tn).Length > 0)));
+                return;
+            }
+            if (name.Length == 0 || (op != "add" && op != "remove" && op != "rm")) { Reply(caller, "[Buy] " + usage); return; }
+            if (op == "add")
+            {
+                if (!ResolveExclusionName(name, out string entry, out string why)) { Reply(caller, "[Buy] " + why); return; }
+                if (list.Exists(x => x.Equals(entry, StringComparison.OrdinalIgnoreCase))) { Reply(caller, $"[Buy] {kind} already excludes {entry}."); return; }
+                list.Add(entry); SaveConfig();
+                Reply(caller, $"[Buy] {kind} upgrades are no longer offered for {entry}. Units that already carry a level keep it until their next refit. Now excluded: {ExclusionList(kind)}.");
+                return;
+            }
+            // remove: the entry as listed, its bare name, or what the name resolves to
+            string resolved = ResolveExclusionName(name, out string res, out _) ? res : "";
+            int removed = list.RemoveAll(x => x.Equals(name, StringComparison.OrdinalIgnoreCase) || ExclusionLabel(x).Equals(name, StringComparison.OrdinalIgnoreCase)
+                                             || (resolved.Length > 0 && x.Equals(resolved, StringComparison.OrdinalIgnoreCase)));
+            if (removed == 0) { Reply(caller, $"[Buy] {kind} has no exclusion '{name}'. Excluded: {(list.Count > 0 ? string.Join(", ", list) : "nothing")}."); return; }
+            SaveConfig();
+            Reply(caller, $"[Buy] {kind} upgrades are offered again for {name}. Now excluded: {(list.Count > 0 ? ExclusionList(kind) : "nothing")}.");
+        }
+
+        /// <summary>
+        /// One toggle of the exclusion editor (and /buy upgradeexclude &lt;kind&gt; toggle). A unit excluded through its production
+        /// building is not taken out on its own: the reply says which building to re-offer.
+        /// </summary>
+        static void SetExclusion(Player? caller, string kind, string name, bool exclude)
+        {
+            if (!ResolveExclusionName(name, out string entry, out string why)) { Reply(caller, "[Buy] " + why); return; }
+            var list = Cfg.UpgradeExclusions[kind];
+            string label = UpgStatAdminLabel(kind), shown = ExclusionLabel(entry);
+            string via = TryParseExclusion(entry, out string type, out string bare) && type == EXCL_UNIT ? ExcludedVia(kind, bare) : "";
+            bool direct = IsExcludedDirect(kind, entry);
+            if (exclude)
+            {
+                if (direct || via.Length > 0) { Reply(caller, $"[Buy] {label} is already not offered for {shown}{(via.Length > 0 && !direct ? " (via " + via + ")" : "")}."); return; }
+                list.Add(entry); SaveConfig();
+                Reply(caller, $"[Buy] {label} is no longer offered for {shown}. Units that already carry a level keep it until their next refit.");
+                return;
+            }
+            if (!direct)
+            {
+                Reply(caller, via.Length > 0
+                    ? $"[Buy] {shown} is excluded through {via}: set {via} to OFFERED to offer {label} again for its units, or exclude the other units one by one."
+                    : $"[Buy] {label} is already offered for {shown}.");
+                return;
+            }
+            list.RemoveAll(x => x.Equals(entry, StringComparison.OrdinalIgnoreCase)); SaveConfig();
+            Reply(caller, $"[Buy] {label} is offered again for {shown}{(via.Length > 0 ? " — but still excluded through " + via : "")}.");
+        }
+
+        /// <summary>Short form for /buy status: "magazine: Heavy Factory, Ultra Heavy Factory, Bomber, Freighter"; "" when none.</summary>
+        static string ExclusionSummary()
+        {
+            var parts = new List<string>();
+            foreach (var k in UPG_KINDS) { string l = ExclusionList(k); if (l.Length > 0) parts.Add(k + ": " + l); }
+            return string.Join("; ", parts);
+        }
+
+        /// <summary>
+        /// /buy upgradestep &lt;percent&gt;                      general step (UpgradeStepPercent), 0 &lt; x &lt;= 500
+        /// /buy upgradestep &lt;kind&gt; &lt;percent|default&gt;     one kind (UpgradeStep&lt;Kind&gt;); default (or -1) = follow the general step
+        /// /buy upgradestep [&lt;kind&gt;]                       show
+        /// Changes reach units at their next upgrade purchase (records keep the steps they were bought with).
+        /// </summary>
+        static void HandleUpgradeStep(Player? caller, string[] parts)
+        {
+            var inv = CultureInfo.InvariantCulture;
+            string a = parts.Length > 2 ? parts[2].ToLowerInvariant() : "";
+            string b = parts.Length > 3 ? parts[3].ToLowerInvariant().TrimEnd('%') : "";
+            string usage = $"Usage: /buy upgradestep <percent>  or  /buy upgradestep <{string.Join("|", UPG_KINDS)}> <percent|default>  (0 < percent <= {UPG_STEP_MAX:0})";
+            if (Array.IndexOf(UPG_KINDS, a) >= 0)
+            {
+                string kind = a;
+                if (b.Length == 0)
+                {
+                    Reply(caller, $"[Buy] Step for '{kind}' = {UpgStep(kind).ToString("0.#", inv)}%{(ValidStep(StepOverride(kind)) ? "" : " (general)")}. {usage}");
+                    return;
+                }
+                if (parts.Length > 4) { Reply(caller, "[Buy] One value only — nothing changed. " + usage); return; }
+                if (b == "default" || b == "general" || b == "-1")
+                {
+                    SetStepOverride(kind, -1f); SaveConfig();
+                    Reply(caller, $"[Buy] Step for '{kind}' follows the general step again: {UpgStep(kind).ToString("0.#", inv)}% per level (applies from the next purchase on each unit).");
+                    return;
+                }
+                if (TryParseFloat(b, out float ks) && ValidStep(ks))
+                {
+                    SetStepOverride(kind, ks); SaveConfig();
+                    Reply(caller, $"[Buy] Step for '{kind}' = {ks.ToString("0.#", inv)}% per level (applies from the next purchase on each unit).");
+                    return;
+                }
+                Reply(caller, "[Buy] " + usage);
+                return;
+            }
+            // The general form takes exactly one number: "/buy upgradestep 30 damage" or a misspelt kind ("/buy upgradestep
+            // firerat 30") must never fall through to the general setter (1.9.1).
+            if (parts.Length > 3)
+            {
+                Reply(caller, $"[Buy] '{a}' is not a stat kind — nothing changed. {usage}");
+                return;
+            }
+            if (TryParseFloat(a.TrimEnd('%'), out float step) && ValidStep(step))
+            {
+                Cfg.UpgradeStepPercent = step; SaveConfig();
+                string own = StepOverrides();
+                Reply(caller, $"[Buy] General upgrade step = {step.ToString("0.#", inv)}% per level (applies from the next purchase on each unit){(own.Length > 0 ? ". Own steps: " + own : "")}.");
+                return;
+            }
+            string overrides = StepOverrides();
+            Reply(caller, $"[Buy] General upgrade step = {Cfg.UpgradeStepPercent.ToString("0.#", inv)}% per level{(overrides.Length > 0 ? "; own steps: " + overrides : "; no kind has its own step")}. {usage}");
+        }
 
         static bool IsAdminSub(string sub)
         {
@@ -148,8 +320,76 @@ namespace Si_Buy
                 case "bounty":
                     HandleBountySubcommand(caller, val, parts);
                     break;
+                case "upgrades":
+                {
+                    bool? want = ParseOnOff(val);
+                    if (!want.HasValue)
+                    {
+                        Reply(caller, $"[Buy] Unit upgrades = {(Cfg.UpgradesEnabled ? "ON" : "OFF")}. Usage: /buy upgrades <on|off>");
+                        break;
+                    }
+                    Cfg.UpgradesEnabled = want.Value; SaveConfig();
+                    OnUpgradesSwitched();
+                    Reply(caller, $"[Buy] Unit upgrades = {(want.Value ? "ON — players can /buy upgrade the unit they control" : "OFF — damage boosts reverted; units already refitted keep their handling until they are gone")}.");
+                    break;
+                }
+                case "upgradestep":
+                case "upgradesteps":   // the ModUI picker row (kind, then value) needs its own command text
+                    HandleUpgradeStep(caller, parts);
+                    break;
+                case "upgrademax":
+                    if (int.TryParse(val, out int max) && max >= 0 && max <= 50)
+                    {
+                        Cfg.UpgradeMaxPerUnit = max; SaveConfig();
+                        Reply(caller, $"[Buy] Upgrades per unit = {max}.");
+                    }
+                    else Reply(caller, $"[Buy] Upgrades per unit = {Cfg.UpgradeMaxPerUnit}. Usage: /buy upgrademax <levels>");
+                    break;
+                case "upgradecost":
+                    if (TryParseFloat(val, out float frac) && frac >= 0f && frac <= 100f)
+                    {
+                        Cfg.UpgradeCostFraction = frac; SaveConfig();
+                        Reply(caller, $"[Buy] Upgrade price = unit cost x {frac:0.##} (min {Cfg.UpgradeMinCost}cr).");
+                    }
+                    else Reply(caller, $"[Buy] Upgrade price = unit cost x {Cfg.UpgradeCostFraction:0.##} (min {Cfg.UpgradeMinCost}cr). Usage: /buy upgradecost <fraction>");
+                    break;
+                case "upgrademincost":
+                    if (int.TryParse(val, out int minCost) && minCost >= 0)
+                    {
+                        Cfg.UpgradeMinCost = minCost; SaveConfig();
+                        Reply(caller, $"[Buy] Upgrade minimum price = {minCost}cr.");
+                    }
+                    else Reply(caller, $"[Buy] Upgrade minimum price = {Cfg.UpgradeMinCost}cr. Usage: /buy upgrademincost <credits>");
+                    break;
+                case "upgradeswapspeed":
+                    if (TryParseFloat(val, out float swapSpeed) && swapSpeed >= 0f)
+                    {
+                        Cfg.UpgradeMaxSwapSpeed = swapSpeed; SaveConfig();
+                        Reply(caller, $"[Buy] Upgrades that refit the unit need it below {swapSpeed:0.#} m/s.");
+                    }
+                    else Reply(caller, $"[Buy] Refit speed limit = {Cfg.UpgradeMaxSwapSpeed:0.#} m/s. Usage: /buy upgradeswapspeed <m/s>");
+                    break;
+                case "upgradeexclude":
+                    HandleUpgradeExclude(caller, parts);
+                    break;
+                case "upgradestat":
+                {
+                    // /buy upgradestat <kind> [on|off]; without on|off it toggles (the ModUI multi-select row sends just the kind)
+                    string kind = val.ToLowerInvariant();
+                    if (Array.IndexOf(UPG_KINDS, kind) < 0)
+                    {
+                        Reply(caller, $"[Buy] Upgradable stats on: {EnabledKinds()}. Usage: /buy upgradestat <{string.Join("|", UPG_KINDS)}> [on|off]");
+                        break;
+                    }
+                    bool? want = ParseOnOff(parts.Length > 3 ? parts[3] : "");
+                    bool now = want ?? !UpgStatEnabled(kind);
+                    SetUpgStatEnabled(kind, now); SaveConfig();
+                    Reply(caller, $"[Buy] Upgrade stat '{kind}' = {(now ? "ON" : "OFF")} (for new purchases; levels already bought stay). On: {EnabledKinds()}.");
+                    break;
+                }
                 default:
-                    Reply(caller, "/buy [status|on|off|enabled <on|off>|starter <amount>|give <player> <amount>|buildingreward <on|off>|structures <on|off>|adminonly <on|off>|bounty (on|off|list|add|remove|reload)]");
+                    Reply(caller, "/buy [status|on|off|enabled <on|off>|starter <amount>|give <player> <amount>|buildingreward <on|off>|structures <on|off>|adminonly <on|off>|bounty (on|off|list|add|remove|reload)" +
+                                  "|upgrades <on|off>|upgradestep [<kind>] <percent|default>|upgrademax <n>|upgradecost <fraction>|upgrademincost <cr>|upgradeswapspeed <m/s>|upgradestat <stat> [on|off]|upgradeexclude [<stat> add|remove <name>]|upgrade dump]");
                     break;
             }
             return true;
@@ -160,9 +400,10 @@ namespace Si_Buy
             string state = Cfg.Enabled ? "<color=#39ff14>ON</color>" : "<color=#ff5050>OFF</color>";
             Reply(caller, $"[Buy] Economy {state} | starter={Cfg.StarterCreditsPerPlayer}cr | kill reward={Cfg.RewardKillFraction:P0} of cost" +
                           $" | building reward={(Cfg.StructureKillRewardsEnabled ? "on" : "off")} | structures={(Cfg.BuyStructuresEnabled ? "on" : "off")}" +
-                          $" | cooldown={Cfg.BuyCooldownSeconds:0}s | shrimp unlock={Cfg.ShrimpBuyUnlockSeconds:0}s" +
+                          $" | cooldown={Cfg.BuyCooldownSeconds:0}s | shrimp unlock={Cfg.ShrimpBuyUnlockSeconds:0}s | air unlock={Cfg.AirBuyUnlockSeconds:0}s" +
                           $" | bounties={(Cfg.BountiesEnabled ? _bountyCfg.Bounties.Count.ToString() : "off")}" +
-                          $" | reset per round={(Cfg.RewardResetOnGameEnd ? "yes" : "no")}");
+                          $" | reset per round={(Cfg.RewardResetOnGameEnd ? "yes" : "no")}" +
+                          $" | upgrades={(Cfg.UpgradesEnabled ? $"on (step {Cfg.UpgradeStepPercent:0.#}%/level{(StepOverrides().Length > 0 ? " [" + StepOverrides() + "]" : "")}, max {Cfg.UpgradeMaxPerUnit}, price x{Cfg.UpgradeCostFraction:0.##} min {Cfg.UpgradeMinCost}cr, refit below {Cfg.UpgradeMaxSwapSpeed:0.#} m/s, stats {EnabledKinds()}{(ExclusionSummary().Length > 0 ? ", excluded " + ExclusionSummary() : "")})" : "off")}");
             if (caller != null)
                 Reply(caller, $"[Buy] Your balance: <color=#39ff14>{GetCredits(caller)}</color>cr");
         }

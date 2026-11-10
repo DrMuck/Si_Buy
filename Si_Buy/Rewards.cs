@@ -79,6 +79,26 @@ namespace Si_Buy
         public static int GetCreditsBySteamId(long steamId)
             => BuyActive ? GetCredits(steamId) : 0;
 
+        // ----- Funding provider (Si_Market) -----
+        // A mod that holds player assets (Si_Market's faction coins) can cover a /buy shortfall:
+        //   provider(steamId, shortfall, execute=false) -> can it cover the shortfall?
+        //   provider(steamId, shortfall, execute=true)  -> sell now; the proceeds arrive through GrantExternalCredits.
+        // Func<> is a framework type, so the consumer passes its delegate through reflection without referencing us.
+        static Func<long, int, bool, bool>? _fundingProvider;
+
+        public static void RegisterFundingProvider(Func<long, int, bool, bool> provider)
+        {
+            _fundingProvider = provider;
+            MelonLogger.Msg("[Buy] Funding provider registered (" + (provider?.Method.DeclaringType?.Assembly.GetName().Name ?? "none") + ").");
+        }
+
+        static bool TryFund(long steamId, int shortfall, bool execute)
+        {
+            if (_fundingProvider == null || shortfall <= 0) return false;
+            try { return _fundingProvider(steamId, shortfall, execute); }
+            catch (Exception ex) { MelonLogger.Warning($"[Buy] Funding provider threw: {ex.Message}"); return false; }
+        }
+
         static void ResetAllCredits()
         {
             _playerCredits.Clear();
